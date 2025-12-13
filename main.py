@@ -39,7 +39,7 @@ class RestrictSysCmd(Star):
             return True, original_cmd_format
         return False, None
 
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=sys.maxsize-1)
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=-1000)
     async def restrict_syscmd_handler(self, event: AstrMessageEvent):
         msg = event.get_message_str().strip()
         is_restricted, matched_format = self.is_restricted_command(msg)
