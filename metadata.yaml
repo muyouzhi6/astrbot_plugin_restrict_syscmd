@@ -1,5 +1,5 @@
 name: astrbot_plugin_restrict_syscmd
-version: 0.2.0
+version: 0.2.1
 description: 限制仅管理员可用某些指令（支持自定义），防止bot被测，防止被恶意new、reset等
 author: 木有知
 repo: https://github.com/muyouzhi6/astrbot_plugin_restrict_syscmd
