@@ -1,18 +1,30 @@
 {
-  "blocked_commands": {
-    "description": "需要权限控制的系统指令列表（防止恶意重置和身份探测）",
-    "type": "list",
-    "default": [
-      "new", "reset", "help", "start", "stop", "about", "status", "config", "settings", "plugin", "plugins_ls"
-    ],
-    "item_type": "string",
-    "hint": "输入需要限制的指令名（无需加前缀），如 reset、help 等敏感指令。被拦截的指令将静默阻止，不提供任何回复"
-  },
-  "command_prefixes": {
-    "description": "需要识别的指令前缀（如 /、:、! 等，留空表示支持无前缀）",
-    "type": "list",
-    "default": ["/", ":", "!", "#", ""],
-    "item_type": "string",
-    "hint": "输入所有需要识别的指令前缀，每项一个，如 /、:、!、#，可留空字符串表示支持无前缀"
-  }
+    "blocked_commands": {
+        "description": "需要拦截的系统指令列表",
+        "type": "list",
+        "default": [
+            "new",
+            "reset",
+            "help",
+            "start",
+            "stop",
+            "about",
+            "status",
+            "config",
+            "settings",
+            "plugin",
+            "plugins_ls"
+        ]
+    },
+    "command_prefixes": {
+        "description": "指令前缀列表，包含空字符串表示支持无前缀指令",
+        "type": "list",
+        "default": [
+            "/",
+            ":",
+            "!",
+            "#",
+            ""
+        ]
+    }
 }
