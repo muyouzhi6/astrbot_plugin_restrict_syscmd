@@ -1,30 +1,126 @@
 {
-    "blocked_commands": {
-        "description": "需要拦截的系统指令列表",
-        "type": "list",
-        "default": [
-            "new",
-            "reset",
-            "help",
-            "start",
-            "stop",
-            "about",
-            "status",
-            "config",
-            "settings",
-            "plugin",
-            "plugins_ls"
-        ]
+  "enabled": {
+    "description": "启用插件",
+    "type": "bool",
+    "default": true
+  },
+  "mode": {
+    "description": "策略模式",
+    "hint": "blocklist: 拦截列表中的命令; allowlist: 只允许列表中的命令",
+    "type": "string",
+    "options": ["blocklist", "allowlist"],
+    "default": "blocklist"
+  },
+  "blocked_commands": {
+    "description": "命令列表",
+    "hint": "blocklist模式下这些命令被拦截; allowlist模式下这些命令被允许",
+    "type": "list",
+    "default": [
+      "new",
+      "reset",
+      "help",
+      "start",
+      "stop",
+      "about",
+      "status",
+      "config",
+      "settings",
+      "plugin",
+      "plugins_ls"
+    ]
+  },
+  "command_prefixes": {
+    "description": "命令前缀",
+    "hint": "识别命令时使用的前缀符号",
+    "type": "list",
+    "default": [
+      "/",
+      ":",
+      "!",
+      "#"
+    ]
+  },
+  "allow_bare_command": {
+    "description": "允许无前缀命令",
+    "hint": "⚠️ 开启后，没有前缀的消息也会被检查。可能误拦普通消息！",
+    "type": "bool",
+    "obvious_hint": true,
+    "default": false
+  },
+  "case_sensitive": {
+    "description": "命令区分大小写",
+    "type": "bool",
+    "default": false
+  },
+  "user_whitelist": {
+    "description": "全局用户白名单",
+    "hint": "这些用户ID不受拦截限制 (所有群生效)",
+    "type": "list",
+    "default": []
+  },
+  "feedback_mode": {
+    "description": "拦截反馈模式",
+    "hint": "none: 不提示; brief: 简短提示; detail: 详细提示",
+    "type": "string",
+    "options": ["none", "brief", "detail"],
+    "default": "brief"
+  },
+  "feedback_message_brief": {
+    "description": "简短反馈消息",
+    "type": "string",
+    "default": "⚠️ 该命令仅管理员可用"
+  },
+  "feedback_message_detail": {
+    "description": "详细反馈消息模板",
+    "hint": "可用变量：{command}、{reason}",
+    "type": "text",
+    "default": "⚠️ 命令 [{command}] 被拦截\n原因: {reason}\n如需使用，请联系管理员"
+  },
+  "cooldown_seconds": {
+    "description": "反馈冷却时间（秒）",
+    "hint": "同一用户的反馈提示冷却时间，防止刷屏",
+    "type": "int",
+    "slider": {
+      "min": 0,
+      "max": 300,
+      "step": 5
     },
-    "command_prefixes": {
-        "description": "指令前缀列表，包含空字符串表示支持无前缀指令",
-        "type": "list",
-        "default": [
-            "/",
-            ":",
-            "!",
-            "#",
-            ""
-        ]
-    }
+    "default": 30
+  },
+  "audit_enabled": {
+    "description": "启用审计日志",
+    "hint": "记录所有拦截事件，可通过 /rsc recent 查看",
+    "type": "bool",
+    "default": true
+  },
+  "audit_max_records": {
+    "description": "审计日志最大记录数",
+    "type": "int",
+    "slider": {
+      "min": 100,
+      "max": 5000,
+      "step": 100
+    },
+    "default": 1000
+  },
+  "enabled_platforms": {
+    "description": "启用的平台",
+    "hint": "留空表示全部启用。可选值: aiocqhttp, telegram, discord, dingtalk, lark, slack, webchat, wecom 等",
+    "type": "list",
+    "default": [
+      "aiocqhttp"
+    ]
+  },
+  "disabled_platforms": {
+    "description": "禁用的平台",
+    "hint": "这些平台不进行任何拦截",
+    "type": "list",
+    "default": []
+  },
+  "disabled_groups": {
+    "description": "禁用拦截的群组ID列表",
+    "hint": "这些群不进行任何拦截",
+    "type": "list",
+    "default": []
+  }
 }
