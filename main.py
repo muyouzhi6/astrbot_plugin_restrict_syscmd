@@ -288,7 +288,8 @@ class RestrictSysCmd(Star):
         await self._ensure_kv_loaded()
         
         raw_msg = getattr(getattr(event, "message_obj", None), "message_str", None)
-        msg = raw_msg if isinstance(raw_msg, str) and raw_msg else event.get_message_str()
+        processed_msg = event.get_message_str()
+        msg = raw_msg if isinstance(raw_msg, str) and raw_msg else processed_msg
         user_id = event.get_sender_id()
         group_id = self._get_group_id(event)
         platform = self._get_platform(event)
@@ -302,6 +303,24 @@ class RestrictSysCmd(Star):
             platform=platform,
             is_admin=is_admin
         )
+
+        # AstrBot filters commands against the post-wake text, which can differ from the raw message.
+        if result.allowed and getattr(event, "is_at_or_wake_command", False):
+            handlers = event.get_extra("activated_handlers") or ()
+            command_activated = any(
+                callable(getattr(event_filter, "get_complete_command_names", None))
+                for handler in handlers
+                for event_filter in getattr(handler, "event_filters", ())
+            )
+            if command_activated:
+                result = self.acl_engine.check(
+                    message=processed_msg,
+                    user_id=user_id,
+                    group_id=group_id,
+                    platform=platform,
+                    is_admin=is_admin,
+                    allow_bare_override=True
+                )
         
         # 无命令或允许通过
         if result.allowed or not result.command:

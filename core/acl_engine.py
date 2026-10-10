@@ -26,7 +26,9 @@ class ACLEngine:
         user_id: str,
         group_id: Optional[str],
         platform: str,
-        is_admin: bool
+        is_admin: bool,
+        *,
+        allow_bare_override: bool = False
     ) -> ACLCheckResult:
         """
         检查消息是否被允许
@@ -58,7 +60,9 @@ class ACLEngine:
             )
         
         # 解析命令
-        parse_result = self.normalizer.extract_command(message)
+        parse_result = self.normalizer.extract_command(
+            message, allow_bare_override=allow_bare_override
+        )
         
         if not parse_result.success or not parse_result.command:
             return ACLCheckResult(

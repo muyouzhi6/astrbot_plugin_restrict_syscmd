@@ -50,13 +50,21 @@ from astrbot_plugin_restrict_syscmd.main import RestrictSysCmd
 MISSING = object()
 
 
+class At:
+    def __init__(self, qq):
+        self.qq = qq
+
+
 class FakeEvent:
-    def __init__(self, raw, processed=None, *, admin=False, platform="aiocqhttp", group=None):
+    def __init__(self, raw, processed=None, *, admin=False, platform="aiocqhttp", group=None,
+                 private=True, messages=None):
         self.message_str = raw if processed is None else processed
-        self.message_obj = types.SimpleNamespace(group_id=group, type="friend")
+        self.message_obj = types.SimpleNamespace(group_id=group, type="friend" if private else "group")
         if raw is not MISSING:
             self.message_obj.message_str = raw
         self.platform = types.SimpleNamespace(name=platform)
+        self.private = private
+        self.messages = [object()] if messages is None else messages
         self.role = "admin" if admin else "member"
         self.is_at_or_wake_command = False
         self.is_wake = False
@@ -74,10 +82,13 @@ class FakeEvent:
         return "ordinary-user"
 
     def get_messages(self):
-        return [object()]
+        return self.messages
 
     def is_private_chat(self):
-        return True
+        return self.private
+
+    def get_self_id(self):
+        return "bot-id"
 
     def get_platform_name(self):
         return self.platform.name
@@ -132,7 +143,7 @@ def _upstream_waking(root, handlers):
             return selected
 
     namespace = {
-        "At": type("At", (), {}),
+        "At": At,
         "AtAll": type("AtAll", (), {}),
         "Reply": type("Reply", (), {}),
         "MessageType": types.SimpleNamespace(GROUP_MESSAGE="group"),
@@ -200,14 +211,20 @@ def _upstream_reset_filter(root):
 
 
 class RestrictSysCmdTests(unittest.IsolatedAsyncioTestCase):
-    async def _check(self, raw, processed=None, config=None, **event_kwargs):
-        settings = {"enabled_platforms": ["aiocqhttp"], "feedback_mode": "none"}
+    async def _check(self, raw, processed=None, config=None, *, upstream_command=False,
+                     woken=False, **event_kwargs):
+        settings = {"enabled_platforms": ["aiocqhttp"]}
         settings.update(config or {})
         plugin = RestrictSysCmd(None, settings)
         event = FakeEvent(raw, processed, **event_kwargs)
-        async for _ in plugin.restrict_syscmd_handler(event):
-            pass
-        return event, plugin.stats_collector.get_stats()
+        event.is_at_or_wake_command = woken or upstream_command
+        if upstream_command:
+            command_filter = types.SimpleNamespace(get_complete_command_names=lambda: ["reset"])
+            event.set_extra("activated_handlers", [types.SimpleNamespace(event_filters=[command_filter])])
+        elif woken:
+            event.set_extra("activated_handlers", [types.SimpleNamespace(event_filters=[AlwaysFilter()])])
+        feedback = [item async for item in plugin.restrict_syscmd_handler(event)]
+        return event, plugin.stats_collector.get_stats(), feedback
 
     async def test_user_entry_and_policy_edges(self):
         cases = [
@@ -225,7 +242,7 @@ class RestrictSysCmdTests(unittest.IsolatedAsyncioTestCase):
             ("disabled group", "/reset", "reset", {"disabled_groups": ["g-disabled"]}, {"group": "g-disabled"}, False),
             ("disabled plugin", "/reset", "reset", {"enabled": False}, {}, False),
             ("disabled platform", "/reset", "reset", None, {"platform": "telegram"}, False),
-            ("default feedback", "/reset", "reset", {"feedback_mode": "brief"}, {}, True),
+            ("default feedback", "/reset", "reset", None, {}, True),
             ("old event fallback", MISSING, "/reset", None, {}, True),
             ("empty original fallback", "", "/reset", None, {}, True),
             ("allowlist rejects reset", "/reset", "reset", {"mode": "allowlist", "blocked_commands": ["help"]}, {}, True),
@@ -233,61 +250,100 @@ class RestrictSysCmdTests(unittest.IsolatedAsyncioTestCase):
         ]
         for label, raw, processed, config, event_kwargs, blocked in cases:
             with self.subTest(label=label):
-                event, stats = await self._check(raw, processed, config, **event_kwargs)
+                event, stats, feedback = await self._check(raw, processed, config, **event_kwargs)
                 self.assertEqual(event.stopped, blocked)
                 self.assertEqual(stats.total_blocked, int(blocked))
+                if label == "default feedback":
+                    self.assertEqual(feedback, ["⚠️ 该命令仅管理员可用"])
+
+    async def test_upstream_command_entry_regressions(self):
+        for label, raw, processed in (
+            ("bare private reset", "reset", "reset"),
+            ("custom wake prefix", "$reset", "reset"),
+            ("overlapping wake prefix", "//reset", "reset"),
+            ("missing original after wake", MISSING, "reset"),
+            ("empty original after wake", "", "reset"),
+        ):
+            with self.subTest(label=label):
+                event, stats, _ = await self._check(raw, processed, upstream_command=True)
+                self.assertTrue(event.stopped)
+                self.assertEqual(stats.total_blocked, 1)
+
+    async def test_private_noncommand_in_allowlist(self):
+        event, stats, feedback = await self._check(
+            "hello", config={"mode": "allowlist", "blocked_commands": ["help"]}, woken=True
+        )
+        self.assertFalse(event.stopped)
+        self.assertEqual(stats.total_blocked, 0)
+        self.assertEqual(feedback, [])
 
     async def test_real_astrbot_waking_and_dispatch(self):
         sources = os.environ.get("ASTRBOT_TEST_SOURCES")
         if not sources:
             self.skipTest("Set ASTRBOT_TEST_SOURCES to extracted AstrBot wheels")
 
+        cases = (
+            ("prefixed private", "/reset", None, ["/"], True, None, True),
+            ("bare private", "reset", None, ["/"], True, None, True),
+            ("bare group mention", "reset", None, ["/"], False, [At("bot-id")], True),
+            ("custom wake prefix", "$reset", None, ["$"], True, None, True),
+            ("overlapping wake prefix", "//reset", None, ["//"], True, None, True),
+            ("missing original after wake", MISSING, "/reset", ["/"], True, None, True),
+            ("empty original after wake", "", "/reset", ["/"], True, None, True),
+            ("bare group without mention", "reset", None, ["/"], False, [], False),
+            ("ordinary private text", "please reset", None, ["/"], True, None, False),
+        )
         for version in ("4.26.8", "4.27.3", "4.28.2"):
-            with self.subTest(version=version):
-                root = Path(sources) / f"astrbot-{version}"
-                self.assertTrue(root.is_dir(), root)
-                plugin = RestrictSysCmd(None, {"enabled_platforms": ["aiocqhttp"], "feedback_mode": "none"})
-                executed = []
+            root = Path(sources) / f"astrbot-{version}"
+            self.assertTrue(root.is_dir(), root)
+            for label, raw, processed, wake_prefix, private, messages, blocked in cases:
+                with self.subTest(version=version, entry=label):
+                    plugin = RestrictSysCmd(None, {"enabled_platforms": ["aiocqhttp"], "feedback_mode": "none"})
+                    executed = []
 
-                async def reset_command(event):
-                    executed.append(event.get_message_str())
+                    async def reset_command(event, _executed=executed):
+                        _executed.append(event.get_message_str())
 
-                handlers = [
-                    types.SimpleNamespace(
-                        event_filters=[AlwaysFilter()],
-                        handler_module_path="astrbot_plugin_restrict_syscmd.main",
-                        handler_full_name="plugin.restrict_syscmd_handler",
-                        handler_name="restrict_syscmd_handler",
-                        handler=plugin.restrict_syscmd_handler,
-                    ),
-                    types.SimpleNamespace(
-                        event_filters=[_upstream_reset_filter(root)],
-                        handler_module_path="astrbot.builtin_stars.builtin_commands.main",
-                        handler_full_name="builtin.reset",
-                        handler_name="reset",
-                        handler=reset_command,
-                    ),
-                ]
-                event = FakeEvent("/reset")
-                stage = types.SimpleNamespace(
-                    unique_session=False,
-                    ignore_bot_self_message=False,
-                    ctx=types.SimpleNamespace(astrbot_config={"admins_id": [], "wake_prefix": ["/"], "plugin_set": ["*"]}),
-                    friend_message_needs_wake_prefix=False,
-                    ignore_at_all=False,
-                    disable_builtin_commands=False,
-                    _umo_auto_name_recorder=types.SimpleNamespace(schedule=lambda event: None),
-                )
-                await _upstream_waking(root, handlers)(stage, event)
-                self.assertEqual(event.get_message_str(), "reset")
-                self.assertEqual(event.message_obj.message_str, "/reset")
-                self.assertEqual(event.get_extra("activated_handlers"), handlers)
-                async for _ in _upstream_dispatch(root)(None, event):
-                    pass
-                self.assertTrue(event.stopped)
-                self.assertEqual(executed, [])
-                self.assertEqual(plugin.stats_collector.get_stats().total_blocked, 1)
-                print(f"AstrBot {version}: /reset blocked before builtin handler")
+                    handlers = [
+                        types.SimpleNamespace(
+                            event_filters=[AlwaysFilter()],
+                            handler_module_path="astrbot_plugin_restrict_syscmd.main",
+                            handler_full_name="plugin.restrict_syscmd_handler",
+                            handler_name="restrict_syscmd_handler",
+                            handler=plugin.restrict_syscmd_handler,
+                        ),
+                        types.SimpleNamespace(
+                            event_filters=[_upstream_reset_filter(root)],
+                            handler_module_path="astrbot.builtin_stars.builtin_commands.main",
+                            handler_full_name="builtin.reset",
+                            handler_name="reset",
+                            handler=reset_command,
+                        ),
+                    ]
+                    event = FakeEvent(raw, processed, private=private, messages=messages,
+                                      group=None if private else "group-1")
+                    stage = types.SimpleNamespace(
+                        unique_session=False,
+                        ignore_bot_self_message=False,
+                        ctx=types.SimpleNamespace(astrbot_config={"admins_id": [], "wake_prefix": wake_prefix, "plugin_set": ["*"]}),
+                        friend_message_needs_wake_prefix=False,
+                        ignore_at_all=False,
+                        disable_builtin_commands=False,
+                        _umo_auto_name_recorder=types.SimpleNamespace(schedule=lambda event: None),
+                    )
+                    await _upstream_waking(root, handlers)(stage, event)
+                    self.assertEqual(event.get_message_str(), "please reset" if label == "ordinary private text" else "reset")
+                    if raw is MISSING:
+                        self.assertFalse(hasattr(event.message_obj, "message_str"))
+                    else:
+                        self.assertEqual(event.message_obj.message_str, raw)
+                    self.assertEqual(handlers[1] in event.get_extra("activated_handlers"), blocked)
+                    async for _ in _upstream_dispatch(root)(None, event):
+                        pass
+                    self.assertEqual(event.stopped, blocked)
+                    self.assertEqual(executed, [])
+                    self.assertEqual(plugin.stats_collector.get_stats().total_blocked, int(blocked))
+                    print(f"AstrBot {version}: {label}: {'blocked' if blocked else 'passed'}")
 
 
 if __name__ == "__main__":

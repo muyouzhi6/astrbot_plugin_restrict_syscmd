@@ -106,7 +106,7 @@ class CommandNormalizer:
         text = text.strip()
         return text
     
-    def extract_command(self, message: str) -> CommandParseResult:
+    def extract_command(self, message: str, *, allow_bare_override: bool = False) -> CommandParseResult:
         """
         从消息中提取命令
         
@@ -137,7 +137,7 @@ class CommandNormalizer:
         
         # 如果没有匹配到前缀
         if matched_prefix is None:
-            if not self.allow_bare_command:
+            if not (self.allow_bare_command or allow_bare_override):
                 return CommandParseResult(
                     success=False,
                     original=original,
