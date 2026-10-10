@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any, List, Set
 from astrbot.api.star import Context, Star
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import logger
+from astrbot.core.star.filter.command import GreedyStr
 
 from .models.types import (
     GlobalPolicy, FeedbackConfig, AuditConfig, AuditRecord,
@@ -407,12 +408,14 @@ class RestrictSysCmd(Star):
         yield event.plain_result("\n".join(lines))
     
     @filter.command("rsc block add")
-    async def rsc_block_add(self, event: AstrMessageEvent, cmd: str = ""):
+    async def rsc_block_add(self, event: AstrMessageEvent, cmd: GreedyStr = GreedyStr):
         """添加拦截命令"""
         if not event.is_admin():
             yield event.plain_result("⚠️ 仅管理员可用")
             return
         
+        if cmd is GreedyStr:
+            cmd = ""
         if not cmd:
             yield event.plain_result("用法: /rsc block add <命令>")
             return
@@ -428,12 +431,14 @@ class RestrictSysCmd(Star):
         yield event.plain_result(f"✅ 已添加拦截命令: {cmd}")
     
     @filter.command("rsc block del")
-    async def rsc_block_del(self, event: AstrMessageEvent, cmd: str = ""):
+    async def rsc_block_del(self, event: AstrMessageEvent, cmd: GreedyStr = GreedyStr):
         """移除拦截命令"""
         if not event.is_admin():
             yield event.plain_result("⚠️ 仅管理员可用")
             return
         
+        if cmd is GreedyStr:
+            cmd = ""
         if not cmd:
             yield event.plain_result("用法: /rsc block del <命令>")
             return
@@ -487,12 +492,14 @@ class RestrictSysCmd(Star):
             yield event.plain_result(f"⚠️ 用户不在白名单中: {user_id}")
     
     @filter.command("rsc test")
-    async def rsc_test(self, event: AstrMessageEvent, cmd: str = ""):
+    async def rsc_test(self, event: AstrMessageEvent, cmd: GreedyStr = GreedyStr):
         """测试命令是否会被拦截"""
         if not event.is_admin():
             yield event.plain_result("⚠️ 仅管理员可用")
             return
         
+        if cmd is GreedyStr:
+            cmd = ""
         if not cmd:
             yield event.plain_result("用法: /rsc test <命令>")
             return

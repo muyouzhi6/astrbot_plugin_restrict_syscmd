@@ -65,7 +65,7 @@ class ACLEngine:
             message, allow_bare_override=allow_bare_override
         )
         
-        if not parse_result.success or not parse_result.command:
+        if not parse_result.success and not command_variants:
             return ACLCheckResult(
                 allowed=True,
                 reason="非命令消息",
@@ -76,12 +76,15 @@ class ACLEngine:
         policy = self.resolver.resolve(group_id)
         
         # 完整命令及其已激活别名共享策略；按词匹配，优先最具体的规则。
-        command = parse_result.command
-        texts = [parse_result.command_text or command]
-        texts.extend(
-            self.normalizer.normalize_command_key(text, self.normalizer.case_sensitive)
-            for text in command_variants
-        )
+        if command_variants:
+            texts = [
+                self.normalizer.normalize_command_key(text, self.normalizer.case_sensitive)
+                for text in command_variants
+            ]
+            command = texts[0] if texts else (parse_result.command or "")
+        else:
+            command = parse_result.command
+            texts = [parse_result.command_text or command]
         matches = [
             candidate for candidate in policy.commands
             if candidate and any(
@@ -176,15 +179,21 @@ class ACLEngine:
         if not self.normalizer.case_sensitive:
             command = command.lower()
         
-        # 检查命令是否在策略范围内
-        is_in_list = command in policy.commands
+        # 检查完整命令及其参数是否命中规则，优先采用最具体的规则。
+        command = self.normalizer.normalize_command_key(command, self.normalizer.case_sensitive)
+        matches = [
+            candidate for candidate in policy.commands
+            if candidate and (command == candidate or command.startswith(candidate + " "))
+        ]
+        is_in_list = bool(matches)
+        matched_command = max(matches, key=lambda item: (len(item), item)) if matches else command
         
         if policy.mode == PolicyMode.BLOCKLIST:
             if not is_in_list:
                 return ACLCheckResult(
                     allowed=True,
                     reason="命令不在拦截列表",
-                    command=command,
+                    command=matched_command,
                     policy_source=policy.source,
                     is_admin=is_admin
                 )
@@ -193,7 +202,7 @@ class ACLEngine:
                 return ACLCheckResult(
                     allowed=True,
                     reason="命令在允许列表",
-                    command=command,
+                    command=matched_command,
                     policy_source=policy.source,
                     is_admin=is_admin
                 )
@@ -203,7 +212,7 @@ class ACLEngine:
             return ACLCheckResult(
                 allowed=True,
                 reason="管理员权限",
-                command=command,
+                command=matched_command,
                 policy_source=policy.source,
                 is_admin=True
             )
@@ -220,13 +229,13 @@ class ACLEngine:
         
         # 会被拦截
         if policy.mode == PolicyMode.BLOCKLIST:
-            reason = f"命令 [{command}] 在拦截列表中，非管理员将被拦截"
+            reason = f"命令 [{matched_command}] 在拦截列表中，非管理员将被拦截"
         else:
-            reason = f"命令 [{command}] 不在允许列表中，非管理员将被拦截"
+            reason = f"命令 [{matched_command}] 不在允许列表中，非管理员将被拦截"
         
         return ACLCheckResult(
             allowed=False,
             reason=reason,
-            command=command,
+            command=matched_command,
             policy_source=policy.source
         )

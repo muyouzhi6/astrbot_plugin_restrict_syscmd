@@ -4,12 +4,12 @@ import ast
 import inspect
 import logging
 import os
-from pathlib import Path
 import re
 import sys
 import types
 import typing
 import unittest
+from pathlib import Path
 
 
 def _install_astrbot_stubs():
@@ -18,6 +18,8 @@ def _install_astrbot_stubs():
     star = types.ModuleType("astrbot.api.star")
     event = types.ModuleType("astrbot.api.event")
     filters = types.ModuleType("astrbot.api.event.filter")
+    commands = types.ModuleType("astrbot.core.star.filter.command")
+    commands.GreedyStr = type("GreedyStr", (str,), {})
 
     class Star:
         def __init__(self, context):
@@ -25,6 +27,9 @@ def _install_astrbot_stubs():
 
         async def get_kv_data(self, key, default=None):
             return default
+
+        async def put_kv_data(self, key, value):
+            self.saved_data = (key, value)
 
     star.Context = type("Context", (), {})
     star.Star = Star
@@ -40,12 +45,13 @@ def _install_astrbot_stubs():
         "astrbot.api.star": star,
         "astrbot.api.event": event,
         "astrbot.api.event.filter": filters,
+        "astrbot.core.star.filter.command": commands,
     })
 
 
 _install_astrbot_stubs()
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from astrbot_plugin_restrict_syscmd.main import RestrictSysCmd
+from astrbot_plugin_restrict_syscmd.main import RestrictSysCmd  # noqa: E402, I001 - Import after installing API stubs.
 
 
 MISSING = object()
@@ -125,7 +131,7 @@ def _load_method(path, class_name, method_name, namespace):
         method,
     ], type_ignores=[])
     ast.fix_missing_locations(module)
-    exec(compile(module, str(path), "exec"), namespace)
+    exec(compile(module, str(path), "exec"), namespace)  # noqa: S102 - Load local upstream pipeline methods.
     return namespace[method_name]
 
 
@@ -202,6 +208,8 @@ def _upstream_command_filter(root, command="reset", aliases=(), parents=None):
     namespace = {"HandlerFilter": object, "inspect": inspect, "re": re,
                  "types": types, "typing": typing}
     exec(compile(tree, str(path), "exec"), namespace)  # noqa: S102 - Load the local upstream class for compatibility tests.
+    # The plugin and filter must share the same GreedyStr marker, as in AstrBot.
+    namespace["GreedyStr"] = sys.modules["astrbot.core.star.filter.command"].GreedyStr
     command_filter = namespace["CommandFilter"](
         command, alias=set(aliases), parent_command_names=parents
     )
@@ -460,6 +468,92 @@ class RestrictSysCmdTests(unittest.IsolatedAsyncioTestCase):
                     "/foo bar baz argument", config={"mode": mode, "blocked_commands": ["foo bar baz"]}
                 )
                 self.assertEqual(event.stopped, blocked)
+
+    async def test_symbol_alias_regressions(self):
+        await self._run_dispatch_cases([
+            ("symbol alias blocks canonical", {
+                "raw": "/!", "aliases": ["!"], "expected_command": "reset",
+            }),
+            ("symbol alias with arguments", {
+                "raw": "/! value", "aliases": ["!"], "expected_command": "reset",
+            }),
+            ("symbol alias missing raw", {
+                "raw": MISSING, "processed": "/!", "aliases": ["!"],
+                "expected_command": "reset",
+            }),
+            ("symbol alias excluded from allowlist", {
+                "raw": "/!", "aliases": ["!"],
+                "config": {"mode": "allowlist", "blocked_commands": ["help"]},
+            }),
+            ("symbol alias allowed by canonical", {
+                "raw": "/!", "aliases": ["!"], "blocked": False,
+                "config": {"mode": "allowlist", "blocked_commands": ["reset"]},
+            }),
+            ("prefix in alias must not match another rule", {
+                "raw": "/!help", "aliases": ["!help"], "blocked": False,
+                "config": {"blocked_commands": ["help"]},
+            }),
+            ("prefix in alias must not grant allowlist access", {
+                "raw": "/!help", "aliases": ["!help"],
+                "config": {"mode": "allowlist", "blocked_commands": ["help"]},
+            }),
+        ])
+
+    async def test_management_full_command_arguments(self):
+        for version, root in self._source_roots():
+            for command, method_name in (
+                ("rsc block add", "rsc_block_add"),
+                ("rsc block del", "rsc_block_del"),
+                ("rsc test", "rsc_test"),
+            ):
+                for argument in ("foo", "foo bar baz", "foo bar baz argument", ""):
+                    with self.subTest(version=version, command=command, argument=argument):
+                        plugin = RestrictSysCmd(None, {"blocked_commands": [argument or "help"]})
+                        if method_name == "rsc_block_add":
+                            plugin.resolver.global_policy.commands.clear()
+                        command_filter = _upstream_command_filter(root, command)
+                        command_filter.init_handler_md(types.SimpleNamespace(
+                            handler=getattr(RestrictSysCmd, method_name)
+                        ))
+                        event = FakeEvent(f"{command} {argument}", admin=True)
+                        event.is_at_or_wake_command = True
+                        self.assertTrue(command_filter.filter(event, {}))
+                        params = event.get_extra("parsed_params")
+                        replies = [item async for item in getattr(plugin, method_name)(event, **params)]
+                        if not argument:
+                            self.assertIn("用法:", replies[0])
+                        elif method_name == "rsc_block_add":
+                            self.assertEqual(plugin.resolver.global_policy.commands, {argument})
+                            self.assertEqual(plugin.saved_data[1]["blocked_commands"], [argument])
+                        elif method_name == "rsc_block_del":
+                            self.assertEqual(plugin.resolver.global_policy.commands, set())
+                            self.assertEqual(plugin.saved_data[1]["blocked_commands"], [])
+                        else:
+                            self.assertIn(f"测试命令: {argument}\n", replies[0])
+                            self.assertIn("结果: 🚫 拦截", replies[0])
+                        self.assertEqual(params, {"cmd": argument})
+
+    def test_diagnostic_multisegment_parity(self):
+        for mode in ("blocklist", "allowlist"):
+            for command, matches in (
+                ("foo bar baz", True),
+                ("foo bar baz argument", True),
+                ("foo bar baz qux argument", True),
+                ("ＦＯＯ\u200b  bar\tbaz argument", True),
+                ("foo bar bazooka", False),
+            ):
+                with self.subTest(mode=mode, command=command):
+                    plugin = RestrictSysCmd(None, {
+                        "mode": mode, "blocked_commands": ["foo bar baz", "foo bar baz qux"],
+                    })
+                    runtime = plugin.acl_engine.check(
+                        "/" + command, "ordinary-user", None, "aiocqhttp", False
+                    )
+                    diagnostic = plugin.acl_engine.test_command(command, "ordinary-user", None, False)
+                    self.assertEqual(runtime.allowed, matches if mode == "allowlist" else not matches)
+                    self.assertEqual(diagnostic.allowed, runtime.allowed)
+                    if matches:
+                        self.assertEqual(diagnostic.command, runtime.command)
 
 
 if __name__ == "__main__":
