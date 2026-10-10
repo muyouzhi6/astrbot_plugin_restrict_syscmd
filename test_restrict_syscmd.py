@@ -356,16 +356,26 @@ class RestrictSysCmdTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_astrbot_waking_and_dispatch(self):
         await self._run_dispatch_cases([
-            ("prefixed private", {"raw": "/reset"}),
-            ("bare private reset", {"raw": "reset"}),
+            ("prefixed private", {"raw": "/reset", "expected_command": "reset"}),
+            ("bare private reset", {"raw": "reset", "expected_command": "reset"}),
             ("bare group mention help", {
                 "raw": "help", "command": "help", "private": False,
-                "messages": [At("bot-id")],
+                "messages": [At("bot-id")], "expected_command": "help",
             }),
-            ("custom wake prefix", {"raw": "$reset", "wake_prefix": ["$"]}),
-            ("overlapping wake prefix", {"raw": "//reset", "wake_prefix": ["//"]}),
-            ("missing original after wake", {"raw": MISSING, "processed": "/reset"}),
-            ("empty original after wake", {"raw": "", "processed": "/reset"}),
+            ("custom wake prefix", {
+                "raw": "$reset", "wake_prefix": ["$"],
+                "config": {"command_prefixes": ["!"]}, "expected_command": "reset",
+            }),
+            ("overlapping wake prefix", {
+                "raw": "//reset", "wake_prefix": ["//"],
+                "config": {"command_prefixes": ["!"]}, "expected_command": "reset",
+            }),
+            ("missing original after wake", {
+                "raw": MISSING, "processed": "/reset", "expected_command": "reset",
+            }),
+            ("empty original after wake", {
+                "raw": "", "processed": "/reset", "expected_command": "reset",
+            }),
             ("bare group without mention", {
                 "raw": "reset", "private": False, "messages": [],
                 "active": False, "blocked": False,
@@ -380,11 +390,12 @@ class RestrictSysCmdTests(unittest.IsolatedAsyncioTestCase):
         await self._run_dispatch_cases([
             ("blocked canonical via alias", {"raw": "/wipe", "aliases": ["wipe"],
                                              "expected_command": "reset"}),
-            ("bare alias", {"raw": "wipe", "aliases": ["wipe"]}),
+            ("bare alias", {"raw": "wipe", "aliases": ["wipe"],
+                            "expected_command": "reset"}),
             ("alias after custom wake", {"raw": "$wipe", "aliases": ["wipe"],
-                                         "wake_prefix": ["$"]}),
+                                         "wake_prefix": ["$"], "expected_command": "reset"}),
             ("alias with missing raw", {"raw": MISSING, "processed": "/wipe",
-                                        "aliases": ["wipe"]}),
+                                        "aliases": ["wipe"], "expected_command": "reset"}),
             ("blocked alias via canonical", {"raw": "/reset", "aliases": ["wipe"],
                                              "config": {"blocked_commands": ["wipe"]}}),
             ("allowed canonical via alias", {"raw": "/wipe", "aliases": ["wipe"],
