@@ -80,6 +80,7 @@ class CommandParseResult:
     prefix: Optional[str] = None
     original: Optional[str] = None
     normalized: Optional[str] = None
+    command_text: str | None = None  # 去前缀后的完整命令文本
 
 
 @dataclass

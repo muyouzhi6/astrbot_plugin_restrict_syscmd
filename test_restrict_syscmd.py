@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import sys
 import types
+import typing
 import unittest
 
 
@@ -190,24 +191,22 @@ class AlwaysFilter:
         return True
 
 
-def _upstream_reset_filter(root):
+def _upstream_command_filter(root, command="reset", aliases=(), parents=None):
     path = root / "astrbot/core/star/filter/command.py"
-    filter_method = _load_method(path, "CommandFilter", "filter", {"re": re})
-
-    class ResetFilter:
-        filter = filter_method
-        handler_params = {}
-
-        def custom_filter_ok(self, event, config):
-            return True
-
-        def get_complete_command_names(self):
-            return ["reset"]
-
-        def validate_and_convert_params(self, params, param_types):
-            return {}
-
-    return ResetFilter()
+    tree = ast.parse(path.read_text())
+    tree.body = [
+        ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
+        *[node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef))],
+    ]
+    ast.fix_missing_locations(tree)
+    namespace = {"HandlerFilter": object, "inspect": inspect, "re": re,
+                 "types": types, "typing": typing}
+    exec(compile(tree, str(path), "exec"), namespace)  # noqa: S102 - Load the local upstream class for compatibility tests.
+    command_filter = namespace["CommandFilter"](
+        command, alias=set(aliases), parent_command_names=parents
+    )
+    command_filter.handler_params = {}
+    return command_filter
 
 
 class RestrictSysCmdTests(unittest.IsolatedAsyncioTestCase):
@@ -277,73 +276,179 @@ class RestrictSysCmdTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.total_blocked, 0)
         self.assertEqual(feedback, [])
 
-    async def test_real_astrbot_waking_and_dispatch(self):
+    def _source_roots(self):
         sources = os.environ.get("ASTRBOT_TEST_SOURCES")
         if not sources:
             self.skipTest("Set ASTRBOT_TEST_SOURCES to extracted AstrBot wheels")
-
-        cases = (
-            ("prefixed private", "/reset", None, ["/"], True, None, True),
-            ("bare private", "reset", None, ["/"], True, None, True),
-            ("bare group mention", "reset", None, ["/"], False, [At("bot-id")], True),
-            ("custom wake prefix", "$reset", None, ["$"], True, None, True),
-            ("overlapping wake prefix", "//reset", None, ["//"], True, None, True),
-            ("missing original after wake", MISSING, "/reset", ["/"], True, None, True),
-            ("empty original after wake", "", "/reset", ["/"], True, None, True),
-            ("bare group without mention", "reset", None, ["/"], False, [], False),
-            ("ordinary private text", "please reset", None, ["/"], True, None, False),
-        )
         for version in ("4.26.8", "4.27.3", "4.28.2"):
             root = Path(sources) / f"astrbot-{version}"
             self.assertTrue(root.is_dir(), root)
-            for label, raw, processed, wake_prefix, private, messages, blocked in cases:
+            yield version, root
+
+    async def _dispatch_case(self, root, raw, *, processed=None, command="reset",
+                             aliases=(), parents=None, wake_prefix=None, private=True,
+                             messages=None, config=None, admin=False, active=True,
+                             blocked=True, expected_command=None, other_commands=()):
+        settings = {"enabled_platforms": ["aiocqhttp"], "feedback_mode": "none"}
+        settings.update(config or {})
+        plugin = RestrictSysCmd(None, settings)
+        executed = []
+
+        async def command_handler(event):
+            executed.append(event.get_message_str())
+
+        handlers = [types.SimpleNamespace(
+            event_filters=[AlwaysFilter()],
+            handler_module_path="astrbot_plugin_restrict_syscmd.main",
+            handler_full_name="plugin.restrict_syscmd_handler",
+            handler_name="restrict_syscmd_handler",
+            handler=plugin.restrict_syscmd_handler,
+        )]
+        for index, command_filter in enumerate([
+            _upstream_command_filter(root, command, aliases, parents),
+            *[_upstream_command_filter(root, name, alias) for name, alias in other_commands],
+        ]):
+            handlers.append(types.SimpleNamespace(
+                event_filters=[command_filter],
+                handler_module_path="astrbot.builtin_stars.builtin_commands.main",
+                handler_full_name=f"builtin.command{index}",
+                handler_name=f"command{index}",
+                handler=command_handler,
+            ))
+        event = FakeEvent(raw, processed, private=private, messages=messages,
+                          group=None if private else "group-1", admin=admin)
+        stage = types.SimpleNamespace(
+            unique_session=False,
+            ignore_bot_self_message=False,
+            ctx=types.SimpleNamespace(astrbot_config={
+                "admins_id": [], "wake_prefix": wake_prefix or ["/"], "plugin_set": ["*"]
+            }),
+            friend_message_needs_wake_prefix=False,
+            ignore_at_all=False,
+            disable_builtin_commands=False,
+            _umo_auto_name_recorder=types.SimpleNamespace(schedule=lambda event: None),
+        )
+        await _upstream_waking(root, handlers)(stage, event)
+        if raw is MISSING:
+            self.assertFalse(hasattr(event.message_obj, "message_str"))
+        else:
+            self.assertEqual(event.message_obj.message_str, raw)
+        activated = event.get_extra("activated_handlers")
+        self.assertEqual(handlers[1] in activated, active)
+        async for _ in _upstream_dispatch(root)(None, event):
+            pass
+        # Check actual downstream execution first, so a regression records the bypass.
+        self.assertEqual(executed, [] if blocked else [
+            event.get_message_str() for handler in handlers[1:] if handler in activated
+        ])
+        self.assertEqual(event.stopped, blocked)
+        stats = plugin.stats_collector.get_stats()
+        self.assertEqual(stats.total_blocked, int(blocked))
+        if expected_command:
+            self.assertEqual(stats.by_command, {expected_command: 1})
+
+    async def _run_dispatch_cases(self, cases):
+        for version, root in self._source_roots():
+            for label, kwargs in cases:
                 with self.subTest(version=version, entry=label):
-                    plugin = RestrictSysCmd(None, {"enabled_platforms": ["aiocqhttp"], "feedback_mode": "none"})
-                    executed = []
+                    await self._dispatch_case(root, **kwargs)
+                    print(f"AstrBot {version}: {label}: passed")
 
-                    async def reset_command(event, _executed=executed):
-                        _executed.append(event.get_message_str())
+    async def test_real_astrbot_waking_and_dispatch(self):
+        await self._run_dispatch_cases([
+            ("prefixed private", {"raw": "/reset"}),
+            ("bare private reset", {"raw": "reset"}),
+            ("bare group mention help", {
+                "raw": "help", "command": "help", "private": False,
+                "messages": [At("bot-id")],
+            }),
+            ("custom wake prefix", {"raw": "$reset", "wake_prefix": ["$"]}),
+            ("overlapping wake prefix", {"raw": "//reset", "wake_prefix": ["//"]}),
+            ("missing original after wake", {"raw": MISSING, "processed": "/reset"}),
+            ("empty original after wake", {"raw": "", "processed": "/reset"}),
+            ("bare group without mention", {
+                "raw": "reset", "private": False, "messages": [],
+                "active": False, "blocked": False,
+            }),
+            ("ordinary private text in allowlist", {
+                "raw": "please reset", "active": False, "blocked": False,
+                "config": {"mode": "allowlist", "blocked_commands": ["help"]},
+            }),
+        ])
 
-                    handlers = [
-                        types.SimpleNamespace(
-                            event_filters=[AlwaysFilter()],
-                            handler_module_path="astrbot_plugin_restrict_syscmd.main",
-                            handler_full_name="plugin.restrict_syscmd_handler",
-                            handler_name="restrict_syscmd_handler",
-                            handler=plugin.restrict_syscmd_handler,
-                        ),
-                        types.SimpleNamespace(
-                            event_filters=[_upstream_reset_filter(root)],
-                            handler_module_path="astrbot.builtin_stars.builtin_commands.main",
-                            handler_full_name="builtin.reset",
-                            handler_name="reset",
-                            handler=reset_command,
-                        ),
-                    ]
-                    event = FakeEvent(raw, processed, private=private, messages=messages,
-                                      group=None if private else "group-1")
-                    stage = types.SimpleNamespace(
-                        unique_session=False,
-                        ignore_bot_self_message=False,
-                        ctx=types.SimpleNamespace(astrbot_config={"admins_id": [], "wake_prefix": wake_prefix, "plugin_set": ["*"]}),
-                        friend_message_needs_wake_prefix=False,
-                        ignore_at_all=False,
-                        disable_builtin_commands=False,
-                        _umo_auto_name_recorder=types.SimpleNamespace(schedule=lambda event: None),
-                    )
-                    await _upstream_waking(root, handlers)(stage, event)
-                    self.assertEqual(event.get_message_str(), "please reset" if label == "ordinary private text" else "reset")
-                    if raw is MISSING:
-                        self.assertFalse(hasattr(event.message_obj, "message_str"))
-                    else:
-                        self.assertEqual(event.message_obj.message_str, raw)
-                    self.assertEqual(handlers[1] in event.get_extra("activated_handlers"), blocked)
-                    async for _ in _upstream_dispatch(root)(None, event):
-                        pass
-                    self.assertEqual(event.stopped, blocked)
-                    self.assertEqual(executed, [])
-                    self.assertEqual(plugin.stats_collector.get_stats().total_blocked, int(blocked))
-                    print(f"AstrBot {version}: {label}: {'blocked' if blocked else 'passed'}")
+    async def test_real_astrbot_aliases(self):
+        await self._run_dispatch_cases([
+            ("blocked canonical via alias", {"raw": "/wipe", "aliases": ["wipe"],
+                                             "expected_command": "reset"}),
+            ("bare alias", {"raw": "wipe", "aliases": ["wipe"]}),
+            ("alias after custom wake", {"raw": "$wipe", "aliases": ["wipe"],
+                                         "wake_prefix": ["$"]}),
+            ("alias with missing raw", {"raw": MISSING, "processed": "/wipe",
+                                        "aliases": ["wipe"]}),
+            ("blocked alias via canonical", {"raw": "/reset", "aliases": ["wipe"],
+                                             "config": {"blocked_commands": ["wipe"]}}),
+            ("allowed canonical via alias", {"raw": "/wipe", "aliases": ["wipe"],
+                                             "blocked": False, "config": {
+                                                 "mode": "allowlist", "blocked_commands": ["reset"]}}),
+            ("allowed alias via canonical", {"raw": "/reset", "aliases": ["wipe"],
+                                             "blocked": False, "config": {
+                                                 "mode": "allowlist", "blocked_commands": ["wipe"]}}),
+            ("unrelated inactive alias", {"raw": "/ping", "command": "ping",
+                                          "blocked": False, "other_commands": [("reset", ["wipe"])]}),
+            ("colliding active alias", {"raw": "/ping", "command": "ping",
+                                        "other_commands": [("reset", ["ping"])]}),
+        ])
+
+    async def test_real_astrbot_multisegment_commands(self):
+        await self._run_dispatch_cases([
+            ("three segment command", {"raw": "/foo bar baz", "command": "foo bar baz",
+                                        "config": {"blocked_commands": ["foo bar baz"]},
+                                        "expected_command": "foo bar baz"}),
+            ("four segment with arguments", {"raw": "/foo bar baz qux value",
+                                             "command": "foo bar baz qux",
+                                             "config": {"blocked_commands": ["foo bar baz qux"]}}),
+            ("three segment allowlist", {"raw": "/foo bar baz", "command": "foo bar baz",
+                                         "blocked": False, "config": {
+                                             "mode": "allowlist", "blocked_commands": ["foo bar baz"]}}),
+            ("three segment parent policy", {"raw": "/foo bar baz", "command": "foo bar baz",
+                                             "config": {"blocked_commands": ["foo bar"]}}),
+            ("multiword command token match", {"raw": "/foo bar bazooka", "command": "foo bar bazooka",
+                                               "blocked": False,
+                                               "config": {"blocked_commands": ["foo bar baz"]}}),
+            ("alias retains trailing words", {"raw": "/wipe bar baz", "aliases": ["wipe"],
+                                              "config": {"blocked_commands": ["reset bar baz"]}}),
+            ("nested command alias", {"raw": "/foo bar wipe", "command": "baz",
+                                      "parents": ["foo bar"], "aliases": ["wipe"],
+                                      "config": {"blocked_commands": ["foo bar baz"]}}),
+            ("parent group alias", {"raw": "/f b baz", "command": "baz",
+                                    "parents": ["foo bar", "foo b", "f bar", "f b"],
+                                    "config": {"blocked_commands": ["foo bar baz"]}}),
+        ])
+
+    async def test_alias_policy_exemptions_and_legacy_config(self):
+        cases = [
+            ("admin", {"admin": True}),
+            ("global whitelist", {"config": {"user_whitelist": ["ordinary-user"]}}),
+            ("group whitelist", {"private": False, "config": {
+                "group_user_whitelist": {"group-1": ["ordinary-user"]}}}),
+            ("disabled group", {"private": False, "config": {"disabled_groups": ["group-1"]}}),
+            ("disabled plugin", {"config": {"enabled": False}}),
+            ("disabled platform", {"config": {"disabled_platforms": ["aiocqhttp"]}}),
+        ]
+        await self._run_dispatch_cases([
+            (label, {"raw": "/wipe", "aliases": ["wipe"], "blocked": False, **kwargs})
+            for label, kwargs in cases
+        ] + [("legacy CSV config", {"raw": "/wipe", "aliases": ["wipe"], "config": {
+            "blocked_commands": "help,reset", "command_prefixes": "/,!,#",
+            "enabled_platforms": "aiocqhttp", "allow_bare_command": False}})])
+
+    async def test_multisegment_without_upstream_metadata(self):
+        for mode, blocked in (("blocklist", True), ("allowlist", False)):
+            with self.subTest(mode=mode):
+                event, _, _ = await self._check(
+                    "/foo bar baz argument", config={"mode": mode, "blocked_commands": ["foo bar baz"]}
+                )
+                self.assertEqual(event.stopped, blocked)
 
 
 if __name__ == "__main__":

@@ -146,7 +146,7 @@ class CommandNormalizer:
             # 允许裸命令
             command_text = normalized
         
-        # 提取命令部分（支持多段命令key，最多2段）
+        # 保留完整命令文本供策略匹配，兼容原有单段和两段字段。
         if not command_text:
             return CommandParseResult(
                 success=False,
@@ -174,7 +174,8 @@ class CommandNormalizer:
             command_2seg=cmd_2seg,  # 新增字段
             prefix=matched_prefix,
             original=original,
-            normalized=normalized
+            normalized=normalized,
+            command_text=command_text if self.case_sensitive else command_text.lower()
         )
     
     def update_config(

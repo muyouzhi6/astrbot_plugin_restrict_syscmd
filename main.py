@@ -304,23 +304,35 @@ class RestrictSysCmd(Star):
             is_admin=is_admin
         )
 
-        # AstrBot filters commands against the post-wake text, which can differ from the raw message.
-        if result.allowed and getattr(event, "is_at_or_wake_command", False):
+        # 已激活的命令按唤醒后的文本检查；原名和别名使用同一策略。
+        if getattr(event, "is_at_or_wake_command", False):
             handlers = event.get_extra("activated_handlers") or ()
-            command_activated = any(
-                callable(getattr(event_filter, "get_complete_command_names", None))
+            command_filters = [
+                event_filter
                 for handler in handlers
                 for event_filter in getattr(handler, "event_filters", ())
-            )
-            if command_activated:
+                if callable(getattr(event_filter, "get_complete_command_names", None))
+            ]
+            command_text = " ".join(processed_msg.split())
+            for command_filter in command_filters:
+                names = command_filter.get_complete_command_names()
+                variants = tuple(
+                    name + command_text[len(matched):]
+                    for matched in names
+                    if command_text == matched or command_text.startswith(matched + " ")
+                    for name in names
+                )
                 result = self.acl_engine.check(
                     message=processed_msg,
                     user_id=user_id,
                     group_id=group_id,
                     platform=platform,
                     is_admin=is_admin,
-                    allow_bare_override=True
+                    allow_bare_override=True,
+                    command_variants=variants
                 )
+                if not result.allowed:
+                    break
         
         # 无命令或允许通过
         if result.allowed or not result.command:

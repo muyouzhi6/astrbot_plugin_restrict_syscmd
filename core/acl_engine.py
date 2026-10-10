@@ -28,7 +28,8 @@ class ACLEngine:
         platform: str,
         is_admin: bool,
         *,
-        allow_bare_override: bool = False
+        allow_bare_override: bool = False,
+        command_variants: tuple[str, ...] = ()
     ) -> ACLCheckResult:
         """
         检查消息是否被允许
@@ -74,22 +75,21 @@ class ACLEngine:
         # 获取生效策略
         policy = self.resolver.resolve(group_id)
         
-        # 检查命令是否在策略范围内（优先匹配2段命令）
+        # 完整命令及其已激活别名共享策略；按词匹配，优先最具体的规则。
         command = parse_result.command
-        command_2seg = parse_result.command_2seg
-        
-        # 优先尝试匹配2段命令
-        matched_command = None
-        is_in_list = False
-        
-        if command_2seg and command_2seg in policy.commands:
-            matched_command = command_2seg
-            is_in_list = True
-        elif command in policy.commands:
-            matched_command = command
-            is_in_list = True
-        else:
-            matched_command = command  # 用于日志
+        texts = [parse_result.command_text or command]
+        texts.extend(
+            self.normalizer.normalize_command_key(text, self.normalizer.case_sensitive)
+            for text in command_variants
+        )
+        matches = [
+            candidate for candidate in policy.commands
+            if candidate and any(
+                text == candidate or text.startswith(candidate + " ") for text in texts
+            )
+        ]
+        is_in_list = bool(matches)
+        matched_command = max(matches, key=lambda cmd: (len(cmd), cmd)) if matches else command
         
         if policy.mode == PolicyMode.BLOCKLIST:
             # 黑名单模式：命令在列表中才需要检查权限
