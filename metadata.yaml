@@ -1,5 +1,5 @@
 name: astrbot_plugin_restrict_syscmd
-version: 2.0.0
+version: 2.0.1
 description: 企业级系统指令权限控制插件 - 支持 blocklist/allowlist 模式、分群策略、用户白名单、运行时管理、审计日志、统计报表
 author: 木有知
 repo: https://github.com/muyouzhi6/astrbot_plugin_restrict_syscmd

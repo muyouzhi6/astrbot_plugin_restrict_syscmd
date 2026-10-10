@@ -3,7 +3,7 @@
 > 🛡️ 专业的机器人安全防护插件，防止非管理员恶意操作和身份探测
 
 [![GitHub](https://img.shields.io/badge/GitHub-仓库地址-blue)](https://github.com/muyouzhi6/astrbot_plugin_restrict_syscmd)
-[![Version](https://img.shields.io/badge/版本-v0.2.0-green)](https://github.com/muyouzhi6/astrbot_plugin_restrict_syscmd)
+[![Version](https://img.shields.io/badge/版本-v2.0.1-green)](https://github.com/muyouzhi6/astrbot_plugin_restrict_syscmd)
 [![AstrBot](https://img.shields.io/badge/适配-AstrBot%20v3.5+-orange)](https://github.com/AstrBotDevs/AstrBot)
 
 ## 🎯 插件简介

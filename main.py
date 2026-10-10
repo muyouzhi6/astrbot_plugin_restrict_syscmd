@@ -1,5 +1,5 @@
 """
-AstrBot 系统指令权限控制插件 v2.0
+AstrBot 系统指令权限控制插件 v2.0.1
 
 功能:
 - 拦截非管理员使用特定系统命令
@@ -287,7 +287,8 @@ class RestrictSysCmd(Star):
         # 确保 KV 数据已加载
         await self._ensure_kv_loaded()
         
-        msg = event.get_message_str()
+        raw_msg = getattr(getattr(event, "message_obj", None), "message_str", None)
+        msg = raw_msg if isinstance(raw_msg, str) and raw_msg else event.get_message_str()
         user_id = event.get_sender_id()
         group_id = self._get_group_id(event)
         platform = self._get_platform(event)
